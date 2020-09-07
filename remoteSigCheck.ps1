@@ -1,4 +1,4 @@
-﻿Measure-Command{
+﻿Measure-Command {
 ###############################
 ## ASSUMPTIONS / LIMITATIONS ##
 ###############################
@@ -69,17 +69,22 @@ if (!$admin)
 
 # setup credentials and persistent connections
 # COMMENT: This could have better handling if required for the complexity of the environment.
+#$remoteHosts = @("192.168.145.132")
+#$remoteHosts = @(
+#    "192.168.145.132", 
+#    "192.168.145.133")
 $remoteHosts = @(
-    "192.168.145.128", 
-    "192.168.145.129", 
-    "192.168.145.130"
+    "192.168.145.132", 
+    "192.168.145.133", 
+    "192.168.145.134"
     )
 Write-Host "[+] Connecting to $($remoteHosts.Count) remote hosts." -ForegroundColor Green
-$cred = Get-Credential -UserName "user" -Message "get password"
+$cred = Get-Credential -UserName "testAdmin" -Message "get password"
 $sessions = New-PSSession $remoteHosts -Credential $cred
 foreach ($remoteHost in $remoteHosts) {if ($sessions.ComputerName -notcontains $remoteHost) {Write-Host "[-] Host not connected: $remoteHost" -ForegroundColor Yellow}}
 
 # get list of unsigned remote binaries
+Write-Host "[+] Getting list of unsigned remote binaries" -ForegroundColor Green
 Invoke-Command $sessions {
     $binaryPaths = (gci $env:ProgramFiles\Windowsapps -Recurse -Force | Where-Object {Test-Path -Include "*.acm", "*.ax", "*.cpl", "*.dll", "*.drv", "*.efi", "*.exe", "*.mui", "*.ocx", "*.scr", "*.sys", "*.tsp" $_.FullName} | select -ExpandProperty Fullname)
     # only need to further investigate unsigned files
@@ -94,13 +99,17 @@ Invoke-Command $sessions {
             $catHash = $hash = (Get-FileHash $catPath -Algorithm MD5).hash
             Add-Member -InputObject $binary -NotePropertyName "catHash" -NotePropertyValue $catHash
             }
-        # get AppX hash
+        # get PE image hash
         $AppXhash = (Get-AppLockerFileInformation $binary.path).hash.hashdatastring.substring(2)
         Add-Member -InputObject $binary -NotePropertyName "AppXhash" -NotePropertyValue $AppXhash
         }
+
+    # collect info about store-signed packages not installed in WindowsApps
+    $rogueAppX = Get-AppPackage -AllUsers | Where-Object {$_.signaturekind -eq "Store" -and $_.installlocation -notlike "$env:ProgramFiles\WindowsApps*" -and $_.installlocation -ne $null}
     }
 
 $remoteNotAuthSigned = Invoke-Command $sessions {$notAuthSigned}
+$rogueAppX = Invoke-Command $sessions {$rogueAppX}
 
 # collect local catalog data
 Write-Host "[+] Collecting Local Catalog Data" -ForegroundColor Green
@@ -131,7 +140,7 @@ foreach ($catalog in $uncollectedLocalCatalogs)
 # determine hashes of catalogs still required (must be retrieved from remote hosts)
 
 # collect remote catalog data
-Write-Host "[+] Collecting Remote Catalog Data" -ForegroundColor Green
+Write-Host "[+] Collecting remote catalog data" -ForegroundColor Green
 Invoke-Command $sessions {
     (Get-Process -id $pid).PriorityClass = "BelowNormal"
     $catalogs = (gci $env:ProgramFiles\Windowsapps -Recurse -Force | Where-Object {$_.name -eq "codeintegrity.cat"} | Sort-Object -Property length)
@@ -152,7 +161,7 @@ $collectedRemoteCatalogs = ($remoteCatalogs | Where-Object {(Test-Path ".\catalo
 Write-Host "[+] $($collectedRemoteCatalogs.Count) remote catalogs already collected" -ForegroundColor Green
 
 $uncollectedRemoteCatalogs = ($remoteCatalogs | Where-Object {(Test-Path ".\catalogs\$($_.hash)") -eq $false})
-Write-Host "[+] Collecting $($uncollectedRemoteCatalogs.count) remote catalogs" -ForegroundColor Green
+Write-Host "[+] Collecting $(($uncollectedRemoteCatalogs | select hash -Unique).count) unique remote catalogs" -ForegroundColor Green
 
 $parseStep = 0
 $filesCollected = 0
@@ -191,9 +200,7 @@ Write-Host "[!] Catalogs not verified: $($unverifiedLocalCat.Count)" -Foreground
 if ($unverifiedLocalCat.count -ge 1)
     {$unverifiedLocalCat | select Status,SignatureType,Path}
 
-Write-Host "[+] Getting list of unsigned remote binaries" -ForegroundColor Green
-
-# use
+# dump catalogs to create master catalog, use hash as key
 Write-Host "[+] Generating Master Catalog" -ForegroundColor Green
 
 $masterCatalog = @{}
@@ -204,7 +211,7 @@ foreach ($cat in $verifiedLocalCat)
     if (!($masterCatalog.ContainsKey($catHash)))
         {$masterCatalog.Add($catHash, $hashes)}
     }
-
+Measure-Command{
 Write-Host "[+] Checking $($remoteNotAuthSigned.Count) potentially unsigned files." -ForegroundColor Green
 
 # update every file
@@ -212,6 +219,7 @@ foreach ($unsignedbinary in $remoteNotAuthSigned)
     {
     $catHash = $unsignedbinary.catHash
     $binHash = $unsignedbinary.AppXhash
+    if (!($catHash)) {break}
     if ($masterCatalog.$catHash.Contains($binHash))
         {
         # update signed status
@@ -228,13 +236,13 @@ foreach ($unsignedbinary in $remoteNotAuthSigned)
         Add-Member -InputObject $unsignedbinary -NotePropertyName "Issuer" -NotePropertyValue $issuer -Force
         }
     }
-
+}
 # organize signature results
 $signed = $remoteNotAuthSigned | Where-Object {$_.status -eq "Signed"} | select status, company, issuer, path, sha1, PSComputerName | Sort-Object company -Descending
 $microsoftSigned = $signed | Where-Object {$_.company -eq "Microsoft Corporation"}
 $nonMicrosoftSigned = $signed | Where-Object {$_.company -ne "Microsoft Corporation"}
 $unsigned = $remoteNotAuthSigned | Where-Object {$_.status -ne "Signed"} | select status, company, issuer, path, sha1, PSComputerName | Sort-Object company -Descending
-}
+
 # report signature results
 Write-Host "[+] $($microsoftSigned.count) Microsoft Signed Binaries" -ForegroundColor Green
 $microsoftSigned | select status, company, issuer, path, PSComputerName | Sort-Object company -Descending | format-table
@@ -249,12 +257,7 @@ if ($unsigned)
     }
 else {Write-Host "[+] $($unsigned.count) Unsigned Remote Binaries" -ForegroundColor Green}
 
-# warn about AppX signed packages not installed in WindowsApps (run this on remote hosts)
-Invoke-Command $sessions {
-    $rogueAppX = Get-AppPackage -AllUsers | Where-Object {$_.signaturekind -eq "Store" -and $_.installlocation -notlike "$env:ProgramFiles\WindowsApps*" -and $_.installlocation -ne $null}
-    }
-
-$rogueAppX = Invoke-Command $sessions {$rogueAppX}
+# warn about AppX signed packages not installed in WindowsApps
 if ($rogueAppX)
     {Write-Host "[-] Remote Non-Certificate-Signed AppX Packages Located Outside '%programfiles%\WindowsApps' -- Very Unusual" -ForegroundColor Yellow
     $rogueAppX | select name, installlocation, PSComputerName
@@ -283,3 +286,4 @@ $sigResults | Select-Object status, certificate, path, sha1 | sort-object -prope
 #get-signatures($sigProcs) | Select-Object status, certificate, path, sha1 | Sort-Object -Property Status | Format-Table
 
 #>
+}
