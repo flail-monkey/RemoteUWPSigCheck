@@ -1,5 +1,4 @@
-﻿Measure-Command {
-###############################
+﻿###############################
 ## ASSUMPTIONS / LIMITATIONS ##
 ###############################
 # 1. Only checks binaries and catalogs in %programfiles%\WindowsApps (where AppX packages are expected). Will give a warning if Windows reports AppX-signed software anywhere else.
@@ -10,8 +9,6 @@
 ##########
 # 1. Use PSScriptRoot for all paths (instead of .\)
 # 2. Create catalog directory if required.
-# 3. Set up malicious service in WindowsApps
-
 
 ##############################
 ## REMOVE BEFORE FINALIZING ##
@@ -44,7 +41,7 @@ if (!$admin)
 # host
 # outbound firewall to allow all traffic to hosts on closed VM network
 # start winrm service
-# set-Item -Path WSMan:\localhost\client\trustedhosts -value "192.168.145.128, 192.168.145.129, 192.168.145.130"
+# set-Item -Path WSMan:\localhost\client\trustedhosts -value "192.168.145.132, 192.168.145.133, 192.168.145.134"
 
 # client
 ## turn off sleep
@@ -68,11 +65,7 @@ if (!$admin)
 ##############################
 
 # setup credentials and persistent connections
-# COMMENT: This could have better handling if required for the complexity of the environment.
-#$remoteHosts = @("192.168.145.132")
-#$remoteHosts = @(
-#    "192.168.145.132", 
-#    "192.168.145.133")
+# This could have better handling if required for the complexity of the environment.
 $remoteHosts = @(
     "192.168.145.132", 
     "192.168.145.133", 
@@ -113,7 +106,10 @@ $rogueAppX = Invoke-Command $sessions {$rogueAppX}
 
 # collect local catalog data
 Write-Host "[+] Collecting Local Catalog Data" -ForegroundColor Green
-$catalogs = (gci $env:ProgramFiles\Windowsapps -Recurse -Force | Where-Object {$_.name -eq "codeintegrity.cat"} | Sort-Object -Property length)
+$catalogs = (gci $env:ProgramFiles\Windowsapps -Recurse -Force | 
+            Where-Object {$_.name -eq "codeintegrity.cat"} | 
+            Sort-Object -Property length)
+
 foreach ($catalog in $catalogs)
     {
     $hash = (Get-FileHash $catalog.fullname -Algorithm MD5).hash
@@ -136,6 +132,7 @@ foreach ($catalog in $uncollectedLocalCatalogs)
     if (Test-Path (".\catalogs\" + $catalog.hash))
         {Write-Host "`r[+] Successfully grabbed catalog: $($catalog.hash) from local host`r" -NoNewline -ForegroundColor Green}
     }
+if ($uncollectedLocalCatalogs) {Write-Host ("" * 100) -NoNewline} # clearing line
 
 # determine hashes of catalogs still required (must be retrieved from remote hosts)
 
@@ -154,6 +151,8 @@ Invoke-Command $sessions {
 # combine remote catalogs locations
 $remoteCatalogs = Invoke-Command $sessions {$catalogs}
 
+
+Measure-Command{ # remove
 # get catalogs from remote hosts, skipping duplicates
 Write-Host "[+] $($remoteCatalogs.Count) total remote Catalogs" -ForegroundColor Green
 
@@ -187,7 +186,7 @@ foreach ($catalog in $uncollectedRemoteCatalogs)
         }
     }
 Write-Host "[+] Collected $filesCollected unique files out of $($uncollectedRemoteCatalogs.Count) total files" -ForegroundColor Green
-
+} # remove
 # verify signatures on all catalogs
 $localCatalogPaths = (gci .\catalogs| select -ExpandProperty fullname)
 $statusLocalCat = ($localCatalogPaths | Get-AuthenticodeSignature)
@@ -211,19 +210,21 @@ foreach ($cat in $verifiedLocalCat)
     if (!($masterCatalog.ContainsKey($catHash)))
         {$masterCatalog.Add($catHash, $hashes)}
     }
-Measure-Command{
+
 Write-Host "[+] Checking $($remoteNotAuthSigned.Count) potentially unsigned files." -ForegroundColor Green
 
-# update every file
-foreach ($unsignedbinary in $remoteNotAuthSigned)
+# go through each file that might be catalog signed (i.e. at least has an associated catalog)
+foreach ($unsignedbinary in ($remoteNotAuthSigned | Where-Object {$_.catHash -ne $null}))
     {
     $catHash = $unsignedbinary.catHash
     $binHash = $unsignedbinary.AppXhash
-    if (!($catHash)) {break}
+    # check if hash is in the associated catalog
     if ($masterCatalog.$catHash.Contains($binHash))
         {
         # update signed status
         $unsignedbinary.Status = "Signed"
+        if ($unsignedbinary.Status -ne "Signed")
+            {"didn't take for some reason " + $unsignedbinary}
         # add the company
         $correctCat = $verifiedLocalCat | Where-Object {$_.path.Split("\")[-1] -eq $catHash}
         $company = [regex]::Match($correctCat.SignerCertificate.Subject,'.+O=([^=]+),').Groups[1].Value
@@ -236,7 +237,7 @@ foreach ($unsignedbinary in $remoteNotAuthSigned)
         Add-Member -InputObject $unsignedbinary -NotePropertyName "Issuer" -NotePropertyValue $issuer -Force
         }
     }
-}
+
 # organize signature results
 $signed = $remoteNotAuthSigned | Where-Object {$_.status -eq "Signed"} | select status, company, issuer, path, sha1, PSComputerName | Sort-Object company -Descending
 $microsoftSigned = $signed | Where-Object {$_.company -eq "Microsoft Corporation"}
@@ -262,28 +263,3 @@ if ($rogueAppX)
     {Write-Host "[-] Remote Non-Certificate-Signed AppX Packages Located Outside '%programfiles%\WindowsApps' -- Very Unusual" -ForegroundColor Yellow
     $rogueAppX | select name, installlocation, PSComputerName
     }
-
-<#
-Invoke-Command $sessions -FilePath C:\users\Joal\Documents\fwblock\fwFunctions.ps1
-Invoke-Command $sessions {$sigResults = get-signatures $binaryPaths}
-#>
-
-
-
-<#
-# basic list of files
-# limitation: only checks in c:\program files\windowsapps\
-# limitation: only checks files with PE extensions (https://en.wikipedia.org/wiki/Portable_Executable)
-Measure-Command{
-$binaryPaths = (gci $env:ProgramFiles\Windowsapps -Recurse -Force | Where-Object {Test-Path -Include "*.acm", "*.ax", "*.cpl", "*.dll", "*.drv", "*.efi", "*.exe", "*.mui", "*.ocx", "*.scr", "*.sys", "*.tsp" $_.FullName} | select -ExpandProperty Fullname)
-}
-
-Measure-Command{
-$sigResults = Get-Signatures($binaryPaths) | Select-Object status, certificate, path, sha1 | Sort-Object -Property Status
-}
-
-$sigResults | Select-Object status, certificate, path, sha1 | sort-object -property Status | Format-Table
-#get-signatures($sigProcs) | Select-Object status, certificate, path, sha1 | Sort-Object -Property Status | Format-Table
-
-#>
-}
