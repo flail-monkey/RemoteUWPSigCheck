@@ -45,19 +45,6 @@ if (!$admin)
 ## turn off sleep
 ## Enable-PSRemoting -skipnetworkprofilecheck -Force
 
-# WINDEV2004EVAL
-# creds = user:password
-
-# WINDEV2003EVAL
-# creds = user:password
-
-# MSEDGEWIN10
-# creds = ieuser:password
-
-# net user password
-# net user user password /add
-# net localgroup administrators user /add
-
 ##############################
 ##### BEGIN SCRIPT WORK ######
 ##############################
