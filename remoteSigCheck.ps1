@@ -1,25 +1,23 @@
-﻿###############################
-## ASSUMPTIONS / LIMITATIONS ##
-###############################
-# 1. Only checks binaries and catalogs in %programfiles%\WindowsApps (where AppX packages are expected). Will give a warning if Windows reports AppX-signed software anywhere else.
-# 2. Not tested against dual-homed machines.
+$homeDir = "C:\UWPCheck"
 
-##########
-## TODO ##
-##########
-# 1. Use PSScriptRoot for all paths (instead of .\)
-# 2. Create catalog directory if required.
+# ensure the working directory exists
+if (!(Test-Path $homeDir))
+    {
+    Write-Host "Home directory does not exist." -ForegroundColor Yellow
+    Write-Host "Edit the script ($homeDir in line 1) to point to working directory of your choice." -ForegroundColor Yellow
+    Write-Host "Place remoteSigCheck.ps1 and fwFunction.ps1 in this directory."
+    break
+    }
 
-##############################
-## REMOVE BEFORE FINALIZING ##
-##############################
+# create the catalog directory if needed
+if (!(Test-Path $homeDir\catalogs))
+    {
+    mkdir $homeDir\catalogs
+    }
 
-if ($PWD -ne "C:\users\Joal\Documents\fwblock")
-    {cd "C:\users\Joal\Documents\fwblock"}
-
-##############################
-## REMOVE BEFORE FINALIZING ##
-##############################
+# move to the working directory
+if ($PWD -ne $homeDir)
+    {cd $homeDir}
 
 # load functions
 . $PSScriptRoot\fwFunctions.ps1
