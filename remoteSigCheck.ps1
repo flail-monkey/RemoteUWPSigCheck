@@ -9,6 +9,17 @@ if (!(Test-Path $homeDir))
     break
     }
 
+# function to dump catalog contents
+function Dump-Catalog($catPath, $sigcheckPath)
+    {
+    # provide path to catalog and sigcheck binary
+    # return array of hashes
+    #$sigcheckPath = (gci $PSScriptRoot -Filter sigcheck.exe | Select-Object -ExpandProperty Fullname)
+    $sigcheckPath = $homedir + "\sigcheck.exe"
+    foreach ($hashString in ((& $sigcheckPath -d $catPath) | where-object {$_.Contains("Hash")}))
+        {$hashString.Split(":")[1].Trim()}
+    }
+
 # create the catalog directory if needed
 if (!(Test-Path $homeDir\catalogs))
     {
@@ -18,9 +29,6 @@ if (!(Test-Path $homeDir\catalogs))
 # move to the working directory
 if ($PWD -ne $homeDir)
     {cd $homeDir}
-
-# load functions
-. $PSScriptRoot\fwFunctions.ps1
 
 # check if run as admin, otherwise exit
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -39,25 +47,27 @@ if (!$admin)
 # host
 # outbound firewall to allow all traffic to hosts on closed VM network
 # start winrm service
-# set-Item -Path WSMan:\localhost\client\trustedhosts -value "192.168.145.132, 192.168.145.133, 192.168.145.134"
+# set-Item -Path WSMan:\localhost\client\trustedhosts -value "192.168.168.130, 192.168.168.131, 192.168.168.132"
 
 # client
 ## turn off sleep
 ## Enable-PSRemoting -skipnetworkprofilecheck -Force
+
+# net user user password /add
+# net localgroup administrators user /add
 
 ##############################
 ##### BEGIN SCRIPT WORK ######
 ##############################
 
 # setup credentials and persistent connections
-# This could have better handling if required for the complexity of the environment.
 $remoteHosts = @(
-    "192.168.145.132", 
-    "192.168.145.133", 
-    "192.168.145.134"
+    "192.168.168.130", 
+    "192.168.168.131", 
+    "192.168.168.132"
     )
 Write-Host "[+] Connecting to $($remoteHosts.Count) remote hosts." -ForegroundColor Green
-$cred = Get-Credential -UserName "testAdmin" -Message "get password"
+$cred = Get-Credential -UserName "user" -Message "get password"
 $sessions = New-PSSession $remoteHosts -Credential $cred
 foreach ($remoteHost in $remoteHosts) {if ($sessions.ComputerName -notcontains $remoteHost) {Write-Host "[-] Host not connected: $remoteHost" -ForegroundColor Yellow}}
 
@@ -113,9 +123,10 @@ Write-Host "[+] Collecting $($uncollectedLocalCatalogs.count) local catalogs" -F
 foreach ($catalog in $uncollectedLocalCatalogs)
     {
     # copy file
-    Copy-Item -Path $catalog.FullName -Destination (".\catalogs\" + $catalog.hash)
-    if (Test-Path (".\catalogs\" + $catalog.hash))
-        {Write-Host "`r[+] Successfully grabbed catalog: $($catalog.hash) from local host`r" -NoNewline -ForegroundColor Green}
+    New-Item -ItemType Directory -Path .\catalogs\ -Name $catalog.hash | Out-Null
+    Copy-Item -Path $catalog.FullName -Destination (".\catalogs\" + $catalog.hash + "\")
+    if (Test-Path (".\catalogs\" + $catalog.hash + "\CodeIntegrity.cat"))
+        {Write-Host "`r[+] Successfully grabbed catalog: $($catalog.hash) from local host`r`n" -NoNewline -ForegroundColor Green}
     }
 if ($uncollectedLocalCatalogs) {Write-Host ("" * 100) -NoNewline} # clearing line
 
@@ -136,8 +147,6 @@ Invoke-Command $sessions {
 # combine remote catalogs locations
 $remoteCatalogs = Invoke-Command $sessions {$catalogs}
 
-
-Measure-Command{ # remove
 # get catalogs from remote hosts, skipping duplicates
 Write-Host "[+] $($remoteCatalogs.Count) total remote Catalogs" -ForegroundColor Green
 
@@ -164,16 +173,17 @@ foreach ($catalog in $uncollectedRemoteCatalogs)
                 }
             }
         # copy file
-        Copy-Item -FromSession $filesession -Path $catalog.FullName -Destination (".\catalogs\" + $catalog.hash)
+        New-Item -ItemType Directory -Path .\catalogs\ -Name $catalog.hash | Out-Null
+        Copy-Item -FromSession $filesession -Path $catalog.FullName -Destination (".\catalogs\" + $catalog.hash + "\")
         $filesCollected++
-        if (!(Test-Path (".\catalogs\" + $catalog.hash)))
+        if (!(Test-Path (".\catalogs\" + $catalog.hash + "\CodeIntegrity.cat")))
             {Write-Host "`r[-] Failed to grab catalog: $($catalog.hash) from $($catalog.PSComputerName)`r" -NoNewline -ForegroundColor Yellow}
         }
     }
 Write-Host "[+] Collected $filesCollected unique files out of $($uncollectedRemoteCatalogs.Count) total files" -ForegroundColor Green
-} # remove
+
 # verify signatures on all catalogs
-$localCatalogPaths = (gci .\catalogs| select -ExpandProperty fullname)
+$localCatalogPaths = (gci .\catalogs\ -Recurse -File | select -ExpandProperty fullname)
 $statusLocalCat = ($localCatalogPaths | Get-AuthenticodeSignature)
 $verifiedLocalCat = $statusLocalCat | Where-Object {$_.status -eq "Valid"}
 $unverifiedLocalCat = $statusLocalCat | Where-Object {$_.status -ne "Valid"}
@@ -190,7 +200,7 @@ Write-Host "[+] Generating Master Catalog" -ForegroundColor Green
 $masterCatalog = @{}
 foreach ($cat in $verifiedLocalCat)
     {
-    $catHash = $cat.path.Split("\")[-1]
+    $catHash = $cat.path.Split("\")[-2]
     $hashes = (Dump-Catalog -catpath $cat.path)
     if (!($masterCatalog.ContainsKey($catHash)))
         {$masterCatalog.Add($catHash, $hashes)}
@@ -211,7 +221,7 @@ foreach ($unsignedbinary in ($remoteNotAuthSigned | Where-Object {$_.catHash -ne
         if ($unsignedbinary.Status -ne "Signed")
             {"didn't take for some reason " + $unsignedbinary}
         # add the company
-        $correctCat = $verifiedLocalCat | Where-Object {$_.path.Split("\")[-1] -eq $catHash}
+        $correctCat = $verifiedLocalCat | Where-Object {$_.path.Split("\")[-2] -eq $catHash}
         $company = [regex]::Match($correctCat.SignerCertificate.Subject,'.+O=([^=]+),').Groups[1].Value
         if ($company -eq "")
             {$company = [regex]::Match($correctCat.SignerCertificate.Subject,'.+=([^=]+)').Groups[1].Value}
@@ -229,12 +239,28 @@ $microsoftSigned = $signed | Where-Object {$_.company -eq "Microsoft Corporation
 $nonMicrosoftSigned = $signed | Where-Object {$_.company -ne "Microsoft Corporation"}
 $unsigned = $remoteNotAuthSigned | Where-Object {$_.status -ne "Signed"} | select status, company, issuer, path, sha1, PSComputerName | Sort-Object company -Descending
 
+# fill in sha1
+foreach ($sketchyApp in $unsigned)
+    {
+    $badSHA1 = Invoke-Command ($sessions | Where-Object {$_.computername -eq $unsigned[0].PSComputerName}) {Get-FileHash -Algorithm SHA1 $using:sketchyApp.Path}
+    $sketchyApp.sha1 = $badSHA1.Hash
+    }
+
+# pause for results
+Read-Host -Prompt "Press enter to continue"
+
 # report signature results
 Write-Host "[+] $($microsoftSigned.count) Microsoft Signed Binaries" -ForegroundColor Green
 $microsoftSigned | select status, company, issuer, path, PSComputerName | Sort-Object company -Descending | format-table
 
+# pause for results
+Read-Host -Prompt "Press enter to continue"
+
 Write-Host "[+] $($nonMicrosoftSigned.count) Non-Microsoft Signed Binaries (At least not signed in the typical way)" -ForegroundColor Green
 $nonMicrosoftSigned | select status, company, issuer, path, PSComputerName | Sort-Object company -Descending | format-table
+
+# pause for results
+Read-Host -Prompt "Press enter to continue"
 
 if ($unsigned)
     {
